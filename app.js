@@ -1,6 +1,6 @@
 document.addEventListener('alpine:init', () => {
     Alpine.data('carbonCalculator', () => ({
-        // All state variables
+        // --- STATE VARIABLES ---
         lang: 'en',
         currentView: 'calculator',
         isLoadingData: true,
@@ -20,7 +20,7 @@ document.addEventListener('alpine:init', () => {
         showPaymentSuccess: false,
         vcmActions: [
             { name_en: 'Switch to B20 Biodiesel', name_my: 'Tukar kepada Biodiesel B20', percentage: 0.20 },
-            { name_en: 'Reforestation on Palm Estate', name_my: 'Penanaman Semula Hutan di Estet Sawit', percentage: 0.15 },
+            { name_en: 'Reforestation on Palm Estate (per hectare)', name_my: 'Penanaman Semula Hutan di Estet Sawit (per hektar)', creditsPerHectare: 10 },
         ],
         chatbotOpen: false,
         chatHistory: [],
@@ -28,11 +28,26 @@ document.addEventListener('alpine:init', () => {
         feedbackSubmitted: false,
         feedback: { easeOfUse: '5', reportClarity: '5', vcmValue: '5', mobileExperience: '5', cbamReadiness: '5', recommendScore: '10', featureRequests: '' },
         extractedLitersPreview: null,
-        
-        // Supabase Client
         supabase: null,
         
-        // All FAQs
+        // Simulators State
+        cbam: {
+            exportVolume: 100,
+            product: 'CPO',
+            taxEur: 0,
+            taxRmy: 0,
+            scope3Preview: 0,
+            riskScore: { en: 'Low', my: 'Rendah', class: 'risk-low' },
+            offsetCost: 0
+        },
+        eudr: {
+            geolocation: 'Yes',
+            certification: 'MSPO/RSPO',
+            landUse: 'No Deforestation',
+            riskScore: { en: 'Low', my: 'Rendah', class: 'risk-low' },
+            mitigation: { en: 'Compliance likely. Maintain records.', my: 'Pematuhan berkemungkinan. Simpan rekod.'}
+        },
+        
         faqs: {
             en: [
                 { q: 'What is Scope 1?', a: '<strong>Scope 1 emissions</strong> are direct GHG emissions from sources an organization owns or controls, like fuel in vehicles.' },
@@ -68,7 +83,7 @@ document.addEventListener('alpine:init', () => {
             const supabaseUrl = 'https://hcdnbrmepzyzqakvdkkc.supabase.co';
             const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhjZG5icm1lcHp5enFha3Zka2tjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTg2MDkyNjcsImV4cCI6MjA3NDE4NTI2N30.gzDEOvKIKKZHtBndbPUd7TGv40Zsn4QEBfu8d6DSJS4';
             
-            if (!supabaseUrl || !supabaseAnonKey || supabaseUrl.includes('YOUR_SUPABASE_URL')) {
+            if (!supabaseUrl.startsWith('http')) {
                 console.warn("Supabase credentials not set.");
                 this.isLoadingData = false;
                 return;
@@ -103,12 +118,11 @@ document.addEventListener('alpine:init', () => {
             this.extractedLitersPreview = null;
             const file = event.target.files[0];
             if (!file) return;
-            // Mock Gemini Parsing
             console.log(`Mock parsing file: ${file.name}`);
             setTimeout(() => {
                 this.extractedLitersPreview = {
                     description: file.name,
-                    liters: parseFloat((Math.random() * 2000 + 500).toFixed(2)) // Random value ~90% accuracy
+                    liters: parseFloat((Math.random() * 2000 + 500).toFixed(2))
                 };
             }, 1000);
         },
@@ -124,23 +138,138 @@ document.addEventListener('alpine:init', () => {
             const { error } = await this.supabase.from('emissions').insert({ liters: this.totalLiters, co2e_tons: this.co2eTons });
             if (error) { console.error("Supabase error:", error); alert("Failed to save data."); }
             else { alert("Calculation saved!"); this.fetchCalculations(); }
-            this.logAnalyticsEvent('save_calculation', { co2e: this.co2eTons });
         },
         
         async fetchCalculations() {
-          this.isLoadingData = true;
-          // Optimize for 3G: fetch only last 20 records
-          const { data, error } = await this.supabase.from('emissions').select('*').order('timestamp', { ascending: false }).limit(20);
-          if (!error) { this.pastCalculations = data; }
-          this.isLoadingData = false;
+            this.isLoadingData = true;
+            const { data, error } = await this.supabase.from('emissions').select('*').order('timestamp', { ascending: false });
+            if (!error) { this.pastCalculations = data; }
+            this.isLoadingData = false;
         },
 
-        async generatePDF() {
+        calculateCbam() {
+            const CBAM_PRICE_EUR = 100; const EUR_TO_MYR = 5.0; const PHASE_IN_RATE_2026 = 0.025;
+            const SCOPE_3_CPO_FACTOR = 0.5; const VCM_CREDIT_PRICE_MYR = 50;
+            this.cbam.taxEur = this.co2eTons * CBAM_PRICE_EUR * PHASE_IN_RATE_2026;
+            this.cbam.taxRmy = this.cbam.taxEur * EUR_TO_MYR;
+            this.cbam.scope3Preview = (this.cbam.exportVolume * 1000) * SCOPE_3_CPO_FACTOR / 1000;
+            this.cbam.offsetCost = this.co2eTons * VCM_CREDIT_PRICE_MYR;
+            if (this.cbam.taxRmy > 5000) this.cbam.riskScore = { en: 'High', my: 'Tinggi', class: 'risk-high' };
+            else if (this.cbam.taxRmy > 1000) this.cbam.riskScore = { en: 'Medium', my: 'Sederhana', class: 'risk-medium' };
+            else this.cbam.riskScore = { en: 'Low', my: 'Rendah', class: 'risk-low' };
+        },
+
+        calculateEudr() {
+            if (this.eudr.landUse === 'Deforestation') {
+                this.eudr.riskScore = { en: 'High', my: 'Tinggi', class: 'risk-high' };
+                this.eudr.mitigation = { en: 'Action required: Land used post-2020 involved deforestation.', my: 'Tindakan diperlukan: Penggunaan tanah selepas 2020 melibatkan penebangan hutan.' };
+            } else if (this.eudr.certification === 'MSPO/RSPO' && this.eudr.geolocation === 'Yes') {
+                this.eudr.riskScore = { en: 'Low', my: 'Rendah', class: 'risk-low' };
+                this.eudr.mitigation = { en: 'Compliance likely. Maintain records.', my: 'Pematuhan berkemungkinan. Simpan rekod.' };
+            } else if (this.eudr.certification === 'MSPO/RSPO' && this.eudr.geolocation === 'No') {
+                this.eudr.riskScore = { en: 'Medium', my: 'Sederhana', class: 'risk-medium' };
+                this.eudr.mitigation = { en: 'Mitigation: Add plot geolocation data to lower risk (Cost: RM0).', my: 'Mitigasi: Tambah data geolokasi plot untuk kurangkan risiko (Kos: RM0).' };
+            } else {
+                this.eudr.riskScore = { en: 'High', my: 'Tinggi', class: 'risk-high' };
+                this.eudr.mitigation = { en: 'Mitigation: Obtain MSPO/RSPO certification and provide geolocation data.', my: 'Mitigasi: Dapatkan pensijilan MSPO/RSPO dan sediakan data geolokasi.' };
+            }
+        },
+
+        async saveSimulation() {
+            const { error } = await this.supabase.from('simulations').insert({
+                volume: this.cbam.exportVolume,
+                cbam_tax_rm: this.cbam.taxRmy,
+                eudr_risk: this.eudr.riskScore.en,
+                mitigation: this.eudr.mitigation.en
+            });
+            if (error) { alert("Failed to save simulation."); console.error(error); }
+            else { alert("Simulation saved!"); }
+        },
+
+        mockPayment() {
+            this.isLoading = true;
+            setTimeout(() => {
+                this.premiumUnlocked = true; this.showPaymentSuccess = true; this.isLoading = false;
+            }, 1500);
+        },
+        
+        get jsonForBi() {
+            return JSON.stringify({ liters: this.totalLiters, co2e_tons: this.co2eTons }, null, 2);
+        },
+        
+        exportVcmCSV() { 
+            if (this.totalLiters <= 0) return;
+             let csvContent = "data:text/csv;charset=utf-8,action,credits_generated,value_rm\n";
+             this.vcmActions.forEach(action => {
+                 const credits = (this.co2eTons * (action.percentage || 0)).toFixed(5);
+                 const value = (credits * 50).toFixed(2);
+                 const name = this.lang === 'my' ? action.name_my : action.name_en;
+                 csvContent += `${name},${credits},${value}\n`;
+             });
+             window.open(encodeURI(csvContent));
+        },
+        
+        askQuestion(question) {
+            const faq = this.faqs[this.lang].find(f => f.q === question);
+            if (faq) {
+                this.chatHistory.push({ type: 'user', text: faq.q });
+                setTimeout(() => this.chatHistory.push({ type: 'bot', text: faq.a }), 300);
+            }
+        },
+        
+        async submitFeedback() {
+            const { error } = await this.supabase.from('feedback').insert({ responses: this.feedback });
+            if (error) { console.error("Feedback error:", error); alert("Failed to submit feedback.");}
+            else { this.feedbackSubmitted = true; }
+        },
+
+        exportCbamJson() {
+            // Export CBAM simulation as JSON
+            const cbamData = {
+                co2e: this.co2eTons,
+                tax_eur: this.cbam.taxEur,
+                tax_rm: this.cbam.taxRmy,
+                scope3: this.cbam.scope3Preview,
+                risk: this.cbam.riskScore.en,
+                offset_cost: this.cbam.offsetCost
+            };
+            const blob = new Blob([JSON.stringify(cbamData, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'cbam_simulation.json';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        },
+
+        exportEudrJson() {
+            // Export EUDR mitigation as JSON
+            const eudrData = {
+                geolocation: this.eudr.geolocation,
+                certification: this.eudr.certification,
+                land_use: this.eudr.landUse,
+                risk: this.eudr.riskScore.en,
+                mitigation: this.eudr.mitigation.en
+            };
+            const blob = new Blob([JSON.stringify(eudrData, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'eudr_mitigation.json';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        },
+        
+        generatePDF(type = 'free') {
             if (this.dieselEntries.length === 0) {
-                this.reportErrorMessage = "Please add at least one diesel entry to generate a report.";
+                this.reportErrorMessage = "Please add at least one diesel entry.";
                 return;
             }
-            // Prepare report content
+            // Premium report logic with jsPDF
             let doc = new window.jspdf.jsPDF();
             let y = 20;
             doc.setFontSize(18);
@@ -155,7 +284,7 @@ document.addEventListener('alpine:init', () => {
             y += 8;
             doc.text(`Total CO2e: ${this.co2eTons.toFixed(3)} tons`, 15, y);
             y += 8;
-            if (this.reportType === 'premium') {
+            if (type === 'premium') {
                 doc.setFontSize(14);
                 doc.setTextColor(255, 140, 0);
                 doc.text("Premium SEDG Report (Paid)", 15, y);
@@ -163,12 +292,10 @@ document.addEventListener('alpine:init', () => {
                 doc.setTextColor(0,0,0);
                 doc.setFontSize(12);
                 doc.text("Sponsor:", 15, y);
-                // Sponsor logo placeholder (rectangle)
                 doc.rect(40, y-5, 30, 15);
                 doc.text("[Logo]", 45, y+5);
                 y += 20;
             }
-            // List entries
             doc.setFontSize(11);
             doc.text("Entries:", 15, y);
             y += 7;
@@ -176,92 +303,20 @@ document.addEventListener('alpine:init', () => {
                 doc.text(`${idx+1}. ${entry.description}: ${entry.liters} L`, 18, y);
                 y += 6;
             });
-            // Save to Supabase reports table
-            try {
-                await this.supabase.from('reports').insert({
-                    report_type: this.reportType,
-                    timestamp: new Date().toISOString()
-                });
-            } catch (e) { console.error('Supabase report save error', e); }
-            doc.save(`SEDG_Report_${this.reportType}_${new Date().toISOString().slice(0,10)}.pdf`);
-            this.logAnalyticsEvent('generate_report', { type: this.reportType });
-        },
-        
-        mockPayment() {
-            this.isLoading = true;
-            setTimeout(() => {
-                this.premiumUnlocked = true;
-                this.showPaymentSuccess = true;
-                this.isLoading = false;
-            }, 1500);
-        },
-        
-        get jsonForBi() {
-            return JSON.stringify({
-                fuel_type: "diesel",
-                liters: this.totalLiters,
-                co2e_tons: this.co2eTons
-            }, null, 2);
-        },
-
-        async exportInsightsJSON() {
-            // Anonymized data insights for Looker
-            const { data, error } = await this.supabase.rpc('get_emissions_insights');
-            if (error) {
-                alert('Failed to fetch insights');
-                return;
+            // Store report in Supabase
+            if (type === 'premium') {
+                this.mockPayment();
+                setTimeout(async () => {
+                    await this.supabase.from('reports').insert({
+                        report_type: type,
+                        timestamp: new Date().toISOString()
+                    });
+                    doc.save(`SEDG_Report_${type}_${new Date().toISOString().slice(0,10)}.pdf`);
+                }, 1600);
+            } else {
+                doc.save(`SEDG_Report_${type}_${new Date().toISOString().slice(0,10)}.pdf`);
             }
-            // data: { avg_co2e_tons, count }
-            const insights = {
-                avg_co2e_tons: data.avg_co2e_tons,
-                count: data.count
-            };
-            const blob = new Blob([JSON.stringify(insights, null, 2)], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'anonymized_insights.json';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-            this.logAnalyticsEvent('export_insights_json');
-        },
-        
-        exportVcmCSV() {
-             if (this.totalLiters <= 0) return;
-             let csvContent = "data:text/csv;charset=utf-8,action,credits,value_rm\n";
-             this.vcmActions.forEach(action => {
-                 const credits = (this.co2eTons * action.percentage).toFixed(5);
-                 const value = (credits * 50).toFixed(2);
-                 const name = this.lang === 'my' ? action.name_my : action.name_en;
-                 csvContent += `${name},${credits},${value}\n`;
-             });
-             window.open(encodeURI(csvContent));
-             this.logAnalyticsEvent('export_vcm_csv');
-        },
-        
-        askQuestion(question) {
-            const faq = this.faqs[this.lang].find(f => f.q === question);
-            if (faq) {
-                this.chatHistory.push({ type: 'user', text: faq.q });
-                setTimeout(() => this.chatHistory.push({ type: 'bot', text: faq.a }), 300);
-                this.logAnalyticsEvent('chatbot_query', { question: faq.q });
-            }
-        },
-        
-        async submitFeedback() {
-            const { error } = await this.supabase.from('feedback').insert({ responses: this.feedback });
-            if (error) { console.error("Feedback error:", error); alert("Failed to submit feedback.");}
-            else { this.feedbackSubmitted = true; }
-            this.logAnalyticsEvent('submit_feedback', { rating: this.feedback.recommendScore });
-        },
-
-        async logAnalyticsEvent(eventName, details = {}) {
-            // Mock logging to Supabase
-            console.log(`ANALYTICS: ${eventName}`, details);
-            // In a real scenario, you'd insert into a Supabase 'analytics' table.
-            // await this.supabase.from('analytics').insert({ event_name: eventName, details: details });
         }
     }));
 });
+
